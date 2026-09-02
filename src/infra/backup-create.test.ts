@@ -820,6 +820,51 @@ describe("createBackupArchive", () => {
     },
   );
 
+  it("excludes a state-local workspace with Nix-style absolute links while preserving a nested agent", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+
+    await withOpenClawTestState(
+      {
+        layout: "state-only",
+        prefix: "openclaw-backup-excluded-workspace-link-",
+        scenario: "minimal",
+      },
+      async (state) => {
+        const workspaceDir = state.statePath("workspace");
+        const agentDir = path.join(workspaceDir, "custom-agent");
+        const managedPolicy = state.path("nix-store-policy.jsonc");
+        await fs.mkdir(agentDir, { recursive: true });
+        await fs.writeFile(managedPolicy, '{"managed":true}\n', "utf8");
+        await fs.symlink(managedPolicy, path.join(workspaceDir, "policy.jsonc"), "file");
+        await fs.writeFile(path.join(workspaceDir, "notes.md"), "workspace notes\n", "utf8");
+        await fs.writeFile(path.join(agentDir, "durable-agent-state.json"), "{}\n", "utf8");
+        await state.writeConfig({
+          agents: {
+            defaults: { workspace: workspaceDir },
+            entries: { main: { default: true, agentDir } },
+          },
+        });
+
+        const archive = await createBackupArchive({
+          output: state.path("backup.tar.gz"),
+          includeWorkspace: false,
+          nowMs: Date.UTC(2026, 8, 2, 14, 30, 0),
+        });
+        const entries = await listArchiveEntries(archive.archivePath);
+
+        expect(archive.assets.map((asset) => asset.kind)).not.toContain("workspace");
+        expect(entries.some((entry) => entry.endsWith("/workspace/policy.jsonc"))).toBe(false);
+        expect(entries.some((entry) => entry.endsWith("/workspace/notes.md"))).toBe(false);
+        expect(
+          entries.some((entry) => entry.endsWith("/custom-agent/durable-agent-state.json")),
+        ).toBe(true);
+        await expect(verifyBackupArchive(archive.archivePath)).resolves.toMatchObject({ ok: true });
+      },
+    );
+  });
+
   it("includes a configured external agent directory when workspaces are excluded", async () => {
     await withOpenClawTestState(
       {
